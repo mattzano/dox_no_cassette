@@ -1,0 +1,134 @@
+---
+title: "checking effect of dox without tdp-43 cassette"
+author: "Matteo Zanovello"
+date: "2022-01-21"
+output:
+---
+
+```{r setup, include = False}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+if (!require("pacman")) {
+    install.packages("pacman") }
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager") }
+pacman::p_load(tidyverse, data.table, ggplot2, janitor, ggpubr, ggrepel,
+               devtools, readxl, DESeq2, readr, edgeR, annotables,
+               PCAtools, clusterProfiler, "org.Hs.eg.db", enrichplot, pcaExplorer, topGO)
+
+source(here::here('scripts','feature_count','create_feature_count_table.R'))
+source(here::here('scripts','feature_count','make_deseq_dfs.R'))
+source(here::here('scripts','feature_count','run_standard_deseq.R'))
+source(here::here('scripts','feature_count','make_volcano_plot.R'))
+source(here::here('scripts','splicing_volcanoplot.R'))
+```
+
+this organizes all the data from the many .bam files and creates one data frame you can work with,
+then runs the make_deseq_dfs() function and run_standard_deseq() and eventually make graphs
+```{r}
+featureCounts <- create_feature_count_table("/Users/matteozanovello/Documents/phd/research_lines/dox_no_cassette/data") #change here!!
+#my_df <- make_deseq_dfs(featureCounts, grep_pattern = "", base_grep = "NT", contrast_grep = "DOX")
+
+my.dds <- run_standard_deseq("/Users/matteozanovello/Documents/phd/research_lines/tdp43_concentration/data/feature_count", #change here!!
+                             base_grep = "NT",
+                             contrast_grep = "DOX",  
+                             grep_pattern = "",
+                             baseName = "Untreated",
+                             contrastName = 'Doxycycline')
+
+label_significant(my.dds$results_table, log2FoldCut = 2, log10padj = 1.5)
+```
+
+splicing volcano - need data!!!
+```{r}
+base <- "noDox"
+contrast <- c("dox00125", 
+              "dox00187", 
+              "dox0021", 
+              "dox0025", 
+              "dox0075"
+              )
+for (i in contrast) {
+    input <- paste(base, i, sep = "-")
+    input_csv <- paste(input, "csv", sep = ".")
+input_splicing <- fread(file.path(here::here(), "data", input_csv))
+input_splicing <- separate_rows(input_splicing, c(names(input_splicing[,c(4:9,12,15)])), sep  = c(";"), convert = T)
+
+a <- splicing_dots_tables_function(input_splicing) #+ annotate("text", x=0.9, y=0.1, label=i)
+plot(a)
+}
+```
+
+This is the vignette for the PCAtools package
+https://bioconductor.org/packages/release/bioc/vignettes/PCAtools/inst/doc/PCAtools.html
+
+We're going to put the "ensgene" into a 'rowname' and then do the PCA analysis using meta data
+Now I'm going to write this using the pipe operator "%>%". Your "hot key" to type that in is: Ctrl + Shift + M
+```{r}
+#featureCounts <- featureCounts[,c(1,5:13,17:20)]
+colnames(featureCounts) <- c("ensgene", 
+                           "DOX_1", "DOX_2", "DOX_3",
+                           "NT_1", "NT_2", "NT_3", 
+                           "gene_name")
+
+pca_table <- featureCounts[,1:7] %>%
+    column_to_rownames('ensgene')
+    
+path_to_meta_you_downloaded <-  "/Users/matteozanovello/Documents/phd/research_lines/dox_no_cassette/data/metadata.csv" #update this
+meta_df <- fread(path_to_meta_you_downloaded)
+meta_df <- meta_df %>%
+    column_to_rownames('sample') 
+meta_df[,1] <- as.factor(meta_df[,1])
+
+annotation <- featureCounts[,c(1,8)] %>%
+    column_to_rownames('ensgene')
+
+pcaExplorer(countmatrix = pca_table, coldata = meta_df, annotation = annotation)
+
+```
+
+GO analysis https://yulab-smu.top/biomedical-knowledge-mining-book/clusterprofiler-go.html
+#see notes above
+```{r}
+results <- my.dds$results_table
+filtered_res <- filter(results, padj < 0.1 & abs(log2FoldChange) > 2)
+## feature 1: numeric vector
+geneList <- pull(filtered_res,3)
+## feature 2: named vector
+names(geneList) = as.character(pull(filtered_res,8))
+## feature 3: decreasing order
+geneList = sort(geneList, decreasing = TRUE)
+
+ggo <- groupGO(gene = names(geneList),
+               OrgDb = org.Hs.eg.db,
+               keyType = "SYMBOL",
+               ont = "MF",
+               level = 3)
+cnetplot(ggo)
+```
+
+```{r}
+ego <- enrichGO(gene = names(geneList),
+                keyType = "SYMBOL",
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.01,
+                qvalueCutoff = 0.05)
+goplot(ego)
+```
+
+```{r}
+pgo <- pairwise_termsim(ego)
+emapplot(pgo)
+```
+
+```{r}
+gse <- gseGO(geneList     = geneList,
+              keyType = "SYMBOL",
+              OrgDb        = org.Hs.eg.db,
+              ont          = "CC",
+              minGSSize    = 50,
+              maxGSSize    = 200,
+              pvalueCutoff = 0.01,
+              verbose      = FALSE)
+```
